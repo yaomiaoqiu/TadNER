@@ -7,6 +7,7 @@ from utils import calculate_ce_loss
 
 
 class BertModelStage1(nn.Module):
+    # 这个模型部分不预测实体的类型，只预测哪些是实体，以及是实体的哪部分
     def __init__(self, args):
         super(BertModelStage1, self).__init__()
         self.args = args
@@ -219,20 +220,26 @@ class BertModelStage1(nn.Module):
         return spans
 
     def forward(self, input_ids=None, token_type_ids=None, attention_mask=None, label_ids=None):
+        # 在这里，我们不预测实体的类型，只预测哪些是实体，以及是实体的哪部分
+        # batch_size, seq_length, hidden_size
         bert_output_raw = \
             self.encoder(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, )[0]
+        # batch_size, seq_length, len(IO_mode)
         logits = self.linear_layer(bert_output_raw)
 
+        # -1,len(IO_mode)
         logits_flatten = torch.flatten(logits, start_dim=0, end_dim=1)[:]
 
+        # batch_size, seq_length -> batch_size * seq_length
         label_ids_flatten = torch.flatten(label_ids, start_dim=0, end_dim=1)[:]
 
-        # filter out those masked tokens
+        # filter out those masked tokens，获取非填充标签的索引
         filtered_indices = torch.where(label_ids_flatten >= 0)[0].cpu().numpy().tolist()
-
+        # 获取到非填充标签对应的输出
         filtered_logits_flatten = logits_flatten[filtered_indices]
-
+        # 过滤填充标签，剩余非填充标签
         filtered_label_ids_flatten = label_ids_flatten[filtered_indices]
+        # 将标签转换为对应的IO_mode，这样就和模型预测的输出一致
         if self.args.IO_mode == 'BIOES':
             converted_label_ids_for_stage1 = self.convert_label_id_to_bioes(filtered_label_ids_flatten)
         elif self.args.IO_mode == 'BIO':
@@ -243,11 +250,12 @@ class BertModelStage1(nn.Module):
         loss = calculate_ce_loss(filtered_logits_flatten,
                                  torch.tensor(converted_label_ids_for_stage1).to(self.args.device),
                                  weight=None)
-
+        # 在这个部分，我们不预测实体的类型，只预测哪些是实体，以及是实体的哪部分
         return loss, filtered_logits_flatten, converted_label_ids_for_stage1
 
 
 class BertModelStage2(nn.Module):
+    # 这部分会预测实体的类型，只预测是实体的实体类型
     def __init__(self, args):
         super(BertModelStage2, self).__init__()
         self.args = args
@@ -270,6 +278,13 @@ class BertModelStage2(nn.Module):
 
     def forward(self, input_ids=None, token_type_ids=None, attention_mask=None, label_ids=None,
                 finetune=False):
+        """
+        输出是一个元组类型的数据 ，包含四部分，
+        last hidden state shape是(batch_size, sequence_length, hidden_size)，hidden_size=768,它是模型最后一层的隐藏状态
+        pooler_output：shape是(batch_size, hidden_size)，这是序列的第一个token (cls) 的最后一层的隐藏状态，它是由线性层和Tanh激活函数进一步处理的，这个输出不是对输入的语义内容的一个很好的总结，对于整个输入序列的隐藏状态序列的平均化或池化可以更好的表示一句话。
+        hidden_states：这是输出的一个可选项，如果输出，需要指定config.output_hidden_states=True,它是一个元组，含有13个元素，第一个元素可以当做是embedding，其余12个元素是各层隐藏状态的输出，每个元素的形状是(batch_size, sequence_length, hidden_size)，
+        attentions：这也是输出的一个可选项，如果输出，需要指定config.output_attentions=True,它也是一个元组，含有12个元素，包含每的层注意力权重，用于计算self-attention heads的加权平均值
+        """
         bert_outputs_raw = \
             self.encoder(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask,
                          output_hidden_states=True)
@@ -280,6 +295,7 @@ class BertModelStage2(nn.Module):
 
         # (batch_size,n,768)->(batch_size*n,768), n is the length of padded sentence
         bert_output_raw_flatten = torch.flatten(bert_output_raw, start_dim=0, end_dim=1)[:]
+        # batch_size, n -> batch_size*n
         label_ids_flatten = torch.flatten(label_ids, start_dim=0, end_dim=1)[:]
 
         # we only select those label_id>=0 (filtering out masked tokens and non-entity tokens)
