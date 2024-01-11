@@ -50,7 +50,7 @@ if __name__ == "__main__":
                         help="predict_results directory")
 
     #############################################################################################################
-    parser.add_argument("--pretrained_model", default='bert-base-uncased', type=str, help="pretrained_model")
+    parser.add_argument("--pretrained_model", default='pretrain_model/chinese-roberta-wwm-ext', type=str, help="pretrained_model")
     parser.add_argument("--pretrained_model_hidden_size", default=768, type=int, help="hidden_size of PLM")
     #############################################################################################################
     parser.add_argument("--mode", default='use_type_name', type=str,
@@ -62,7 +62,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--n_way_k_shot", default=None, type=str, help="n_way_k_shot")
     parser.add_argument("--test_episodes_num_start", default=0, type=int, help="test_episodes_num_start")
-    parser.add_argument("--test_episodes_num", default=5000, type=int, help="test_episodes_num")
+    parser.add_argument("--test_episodes_num", default=1, type=int, help="test_episodes_num")
 
     parser.add_argument("--k_shot", default=None, type=int, help="k_shot")
 
@@ -119,9 +119,13 @@ if __name__ == "__main__":
     if args.dataset_target in ['WNUT17', 'CONLL2003', 'I2B2', 'GUM'] and args.k_shot is None:
         raise Exception('Please note k_shot in Cross-Domain settings eg. 5')
 
+    # 设置自己数据集的n_way_k_shot
+    if args.dataset_target in ['GOV-NERD'] and args.n_way_k_shot is None:
+        raise Exception('Please note n_way_k_shot in GOV-NERD settings,eg. 2_5')
+
     # default for 1000 episodes in FEW-NERD
     args.test_episodes_num_start = 0
-    args.test_episodes_num = 5000
+    args.test_episodes_num = 1
 
     args.train = parse_boolean_argument(args.train, arg_item='train')
 
@@ -142,7 +146,7 @@ if __name__ == "__main__":
         0: 'filepath_labels',
         1: 'filepath_source_train',
         2: 'filepath_source_dev',
-        3: 'filepath_target_episodes',  # used in FEW-NERD setting
+        3: 'filepath_target_episodes',  # used in FEW-NERD setting or GOV-NERD setting
         4: 'filepath_target'  # used in Cross-Domain setting
     }
 
@@ -153,6 +157,7 @@ if __name__ == "__main__":
     print('*********** reading labels from file: ', args.filepath_labels, ' *****************')
     labels_from_file = read_labels_from_file(args.filepath_labels, args)
 
+    # 这里面的proxy_label就是对原来的label进行名称的简化，位置和含义都是一样的
     label_mapping = {
         0: 'id2label',
         1: 'id2label_train',
@@ -175,12 +180,13 @@ if __name__ == "__main__":
     args.target_class_num = len(args.id2label_test)
 
     ############################################################################
-    args.gpu_id = 2
+    args.gpu_id = 0
     print('***************** working on gpu id: ', args.gpu_id, ' *****************')
     args.device = torch.device("cuda:" + str(args.gpu_id) if torch.cuda.is_available() else "cpu")
 
+    # 我们的数据集是中文数据集，因此需要加载中文bert模型
     args.tokenizer = BertTokenizer.from_pretrained(args.pretrained_model)
-
+    
     args.n_gpu = 0 if not torch.cuda.is_available else torch.cuda.device_count()
     args.n_gpu = min(1, args.n_gpu)
     set_seeds(args)
