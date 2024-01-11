@@ -123,8 +123,11 @@ def convert_to_feature(sentence, label_ids, args):
     max_seq_length = args.max_seq_length
     sentence_tokens = []
     label_ids_tokens = []
+    # 每个句子，句子对应的label_id
     for word, label_id in zip(sentence, label_ids):
+        # 单词进行分词 eg. apple -> a,p,p,l,e
         word_tokens = args.tokenizer.tokenize(word)
+        # 单词的第一字母对应的是标签，其它位置是填充，假设公司标签对应的id是2，label_id_tokens 为 [2,-1,-1,-1,-1]
         label_id_tokens = [label_id] + [-1] * (len(word_tokens) - 1)
         if len(word_tokens) == 0:  # Meet special space character
             word_tokens = args.tokenizer.tokenize('[UNK]')
@@ -137,6 +140,7 @@ def convert_to_feature(sentence, label_ids, args):
 
     input_ids = args.tokenizer.convert_tokens_to_ids(sentence_tokens)
 
+    # 填充到max_len
     padding_length = max_seq_length - len(input_ids)
     if padding_length >= 0:
         attention_mask = [1] * len(input_ids) + [0] * padding_length
@@ -202,6 +206,25 @@ def read_conll2003_format_data_from_file(filepath, data_name, read_samples=False
         sentences_word = [item for item in sentences_word if len(item) > 0]
         sentences_label = [item for item in sentences_label if len(item) > 0]
         return sentences_word, sentences_label
+
+
+def read_gov_nerd_format_data_from_file(filepath):
+    with open(filepath, "r", encoding='UTF-8') as f:  # 打开文件
+        data = f.readlines()
+        sentences_word = []
+        sentences_label = []
+        for line in data:
+            json_data = json.loads(line)
+            sentence = json_data['text']
+            sentence_label = json_data['label']
+            for label in sentence_label:
+                if label != 'O':
+                    sentences_word.append(sentence)
+                    sentences_label.append(sentence_label)
+                    break
+        
+    return sentences_word, sentences_label
+
 
 
 def read_episodes_data_from_file(filepath, args, start=0, end=5000):
@@ -292,7 +315,7 @@ def get_filepath(args):
     filepath_source_train = ''
     filepath_source_dev = ''
 
-    # used in FEW-NERD setting
+    # used in FEW-NERD setting or GOV-NERD setting
     filepath_target_episodes = ''
 
     # used in Cross-Domain setting
@@ -309,6 +332,12 @@ def get_filepath(args):
         filepath_source_train = 'data_raw/FEW-NERD/inter/train.txt'
         filepath_source_dev = 'data_raw/FEW-NERD/inter/dev_' + args.n_way_k_shot + '.jsonl'
         filepath_target_episodes = 'data_raw/FEW-NERD/inter/test_' + args.n_way_k_shot + '.jsonl'
+
+    # 自己的数据集
+    elif args.dataset_target == 'GOV-NERD':
+        filepath_source_train = 'data_raw/GOV-NERD/train.json'
+        filepath_source_dev = 'data_raw/GOV-NERD/dev_' + args.n_way_k_shot + '.jsonl'
+        filepath_target_episodes = 'data_raw/GOV-NERD/test_' + args.n_way_k_shot + '.jsonl'
 
     # Cross-Domain Setting
     else:
@@ -339,6 +368,8 @@ def get_filepath(args):
         filepath_labels = 'data_raw/FEW-NERD/intra/' + base_labels_json_file
     elif args.dataset_target == 'FEW-NERD-INTER':
         filepath_labels = 'data_raw/FEW-NERD/inter/' + base_labels_json_file
+    elif args.dataset_target == 'GOV-NERD':
+        filepath_labels = 'data_raw/GOV-NERD/' + base_labels_json_file
     else:
         # include train(source), dev(source), test(target) labels
         filepath_labels = 'data_raw/' + args.dataset_target + '/' + base_labels_json_file
@@ -377,6 +408,8 @@ class MyDataset(Dataset):  #
 def get_original_prototypes(args, bert_encoder_pt, support_sentences, support_labels_ids, label_dict, label_types_id):
     """
     get prototypes by support
+    label_types_id 中记录了support集中的标签在整个标签中的id
+    label_dict 记录了每个标签在label_types_id 中的索引 {"2": 0}，表明标签id为2在label_types_id的0号位置
     """
 
     spans_emb = [[] for i in range(len(label_types_id))]
@@ -397,21 +430,28 @@ def get_original_prototypes(args, bert_encoder_pt, support_sentences, support_la
         filtered_indices = torch.where(labels_flatten >= 0)[0].cpu().numpy().tolist()
 
         filtered_bert_output_raw_flatten = bert_output_raw_flatten[filtered_indices]
+        # 将label_id 转变为 [{"start":0,"end":1,"label":2},{"start":3,"end":3,"label":7}]
         span_label_support = extract_entity_span_label(support_label_id)
         for span in span_label_support:
+            # 将实体的embedding加和平均（[768]）
             span_emb = torch.sum(filtered_bert_output_raw_flatten[span["start"]:span["end"] + 1], 0) / (
                     span["end"] + 1 - span["start"])
-
+            # print('span_emb:', span_emb.size())
+            # 记录实体对应的加和平均embedding
+            # len(label_types_id), label_span_num, [768]
             spans_emb[label_dict[span["label"]]].append(span_emb)
-
     proto_emb = []
+    # 将所有句子中实体的加和平均embedding沿第一个维度堆叠起来，然后取均值
     for item in spans_emb:
+        # (label_span_num, 768)
         item_ = torch.stack(item)
+        # print("item_:", item_.size())
         proto_emb.append(torch.mean(item_, 0))
-
+    # 将所有实体的embedding沿第一个维度堆叠起来，然后进行归一化
+    # (len(label_types_id), 768)
     proto_emb = torch.stack(proto_emb)
     proto_emb = F.normalize(proto_emb, p=2, dim=0)
-
+    # 返回所有句子中实体的归一化embedding
     return proto_emb
 
 
@@ -517,3 +557,10 @@ def extract_entity_span(label_io_list):
                 mention_spans[-1]["end"] = len(label_io_list) - 1
 
     return mention_spans
+
+
+if __name__ == "__main__":
+#     # filepath = os.path.join(os.getcwd(), 'data_raw', 'GOV-NERD', 'train.json')
+    filepath = os.path.join(os.getcwd(), 'data_raw', 'FEW-NERD', 'intra', 'train.txt')
+    sentence, label = read_conll2003_format_data_from_file(filepath, 'FEW-NERD-INTRA')
+    print(sentence[:3], label[:3])
