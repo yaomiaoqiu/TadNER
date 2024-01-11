@@ -21,6 +21,7 @@ from utils import read_episodes_data_from_file, convert_label_id_to_io, get_orig
 
 
 def adapt_predict_stage1_episode(args, episode_data, bert_model_stage1):
+    # 根据support集，微调stage1模型
     ############ prepare data #####################
     episode_support_sentence = episode_data["support_sentences"]
     episode_support_label_id = episode_data["support_labels_ids"]
@@ -34,6 +35,7 @@ def adapt_predict_stage1_episode(args, episode_data, bert_model_stage1):
     for sentence, label_id in zip(episode_support_sentence, episode_support_label_id):
         episode_support_features_stage1.append(convert_to_feature(sentence, label_id, args))
 
+    # 根据support集构造stage1模型的输入
     episode_support_input_ids = torch.stack(
         [torch.tensor(feature.input_ids) for feature in episode_support_features_stage1])
     episode_support_attention_mask = torch.stack(
@@ -52,6 +54,7 @@ def adapt_predict_stage1_episode(args, episode_data, bert_model_stage1):
     up_bound = 2
     if args.n_way_k_shot in ['5_5', '10_5']:
         up_bound = 6
+    # 用support集（如果是5_1，那么只有5条数据）中的数据训练100次
     for i in range(100):
         optimizer_stage1.zero_grad()
         loss_stage1, _1, _2 = \
@@ -99,6 +102,7 @@ def adapt_predict_stage1_episode(args, episode_data, bert_model_stage1):
     #     span_preds.append(span_pred)
     #     span_golds.append(span_gold)
 
+    # 构造query集
     episode_query_features_stage1 = []
     for sentence, label_id in zip(episode_query_sentence, episode_query_label_id):
         episode_query_features_stage1.append(convert_to_feature(sentence, label_id, args))
@@ -109,6 +113,7 @@ def adapt_predict_stage1_episode(args, episode_data, bert_model_stage1):
         [torch.tensor(feature.attention_mask) for feature in episode_query_features_stage1])
     episode_query_stage1 = torch.stack([torch.tensor(feature.label_ids) for feature in episode_query_features_stage1])
 
+    # 获取模型的输出
     _, logits_stage1, label_ids_stage1 = \
         bert_model_stage1(
             input_ids=episode_query_input_ids.to(args.device),
@@ -125,10 +130,12 @@ def adapt_predict_stage1_episode(args, episode_data, bert_model_stage1):
         # print(sentence)
         len_sen = len(sentence)
         # print(len_sen)
-
+        # 获取每个句子的预测结果
         pred_io = preds_stage1[index_now:index_now + len_sen]
         gold_io = label_ids_stage1[index_now:index_now + len_sen]
         # print(pred_io)
+        # 将预测结果（BIO之类的）转换为每个实体的起止索引
+        # span_pred e.g. [{"start": 1, "end": 3}, {"start": 5, "end": 7}]
         span_pred = bert_model_stage1.decode_label_ids(pred_io)
         span_gold = bert_model_stage1.decode_label_ids(gold_io)
         span_preds.append(span_pred)
@@ -141,7 +148,9 @@ def adapt_predict_stage1_episode(args, episode_data, bert_model_stage1):
     tp = 0
     num_pred = 0
     num_gold = 0
+    # 遍历每个句子
     for span_pred, span_gold in zip(span_preds, span_golds):
+        # 预测的实体的起始在真正的实体的起始中，说明预测正确
         for pred in span_pred:
             if pred in span_gold:
                 tp += 1
@@ -363,14 +372,16 @@ def adapt_predict_stage1_cross_domain(args, bert_model_stage1, support_sentences
 
 def adapt_stage2(args, ModelStage2, sentences_support, labels_ids_support, label_types_id,
                  label_dict):
-    # get the emb of type names and put it into the linear layer
+    # label_types_id 记录了这个support集中有几个标签（实体类型）
+    # get the emb of type names and put it into the linear layer，获取标签（是标签不是标签对应的id）的embedding
     all_label_emb = get_proxy_label_emb(args, ModelStage2, label_types_id)
     ModelStage2.linear_layer = nn.Linear(args.pretrained_model_hidden_size, len(label_types_id)).to(args.device)
-
+    
     ModelStage2.linear_layer.weight = nn.Parameter(all_label_emb.to(args.device))
 
     sentences_support_filtered = []
     labels_ids_support_filtered = []
+    # 过滤掉没有标签的句子
     for sentence, label_ids in zip(sentences_support, labels_ids_support):
         if sum(label_ids) > 0:
             sentences_support_filtered.append(sentence)
@@ -450,6 +461,7 @@ def adapt_stage2(args, ModelStage2, sentences_support, labels_ids_support, label
             #     print('### Current avg loss: ', avg_loss, ' ###')
             #     break
     else:
+        # 老样子，构造模型的输入
         features = []
         for sentence, label_ids in zip(sentences_support_filtered, labels_ids_support_filtered):
             features.append(convert_to_feature(sentence, label_ids, args))
@@ -465,6 +477,7 @@ def adapt_stage2(args, ModelStage2, sentences_support, labels_ids_support, label
         flag = 0
         loss_before = 1000
         bert_stage2 = ModelStage2.encoder
+        # 对二阶段模型进行微调
         for i in range(args.finetune_target_epochs_stage2):
             optimizer.zero_grad()
             bert_encoder_outputs = \
@@ -592,6 +605,7 @@ def predict_stage2_episode(args, bert_encoder_pt, all_proto_emb, span_preds, que
     query_features_attention_mask = []
     query_features_label_ids = []
 
+    # 构造输入输出
     for i, (span_pred, sentence, label_ids) in enumerate(tqdm(zip(span_preds, query_sentences, query_label_ids))):
         feature = convert_to_feature(sentence, label_ids, args)
         query_features_input_ids.append(torch.tensor(feature.input_ids))
@@ -611,45 +625,60 @@ def predict_stage2_episode(args, bert_encoder_pt, all_proto_emb, span_preds, que
             attention_mask=query_features_attention_mask.to(args.device),
             output_hidden_states=True
         )
-    # print((torch.sum(torch.stack(bert_encoder_outputs.hidden_states[-4:]), 0) / 4).size())
 
+    # [batch_size, max_len, 768] 将后四层的输出加和取平均
     bert_encoder_output = torch.sum(torch.stack(bert_encoder_outputs.hidden_states[-4:]), 0) / 4
+    # print('bert_encoder_output:', (torch.sum(torch.stack(bert_encoder_outputs.hidden_states[-4:]), 0) / 4).size())
+    # [batch_size * max_len, 768]
     bert_output_raw_flatten = torch.flatten(bert_encoder_output, start_dim=0, end_dim=1)[:]
-    # print(bert_output_raw_flatten.size())
+    # print('bert_output_raw_flatten:', bert_output_raw_flatten.size())
     labels_flatten = torch.tensor(torch.flatten(query_features_label_ids, start_dim=0, end_dim=1)[:].numpy().tolist())[:]
     # print(labels_flatten.size())
     filtered_indices = torch.where(labels_flatten >= 0)[0].cpu().numpy().tolist()
+    # [len(filtered_indices), 768]
     filtered_bert_output = bert_output_raw_flatten[filtered_indices]
-    # print(filtered_bert_output.size())
+    # print('filtered_bert_output:', filtered_bert_output.size())
 
+    # 获取每个句子对应的embedding
     all_filtered_bert_output_raw_flatten = []
     index_now = 0
     for sentence in query_sentences:
         len_sen = len(sentence)
+        # 获取句子的embedding
         filtered_bert_output_raw_flatten = filtered_bert_output[index_now:index_now + len_sen]
         all_filtered_bert_output_raw_flatten.append(filtered_bert_output_raw_flatten)
         index_now += len_sen
 
-
+    # （预测的实体位置，句子的embedding）
     for i, (span_pred, filtered_bert_output_raw_flatten) in enumerate(
             tqdm(zip(span_preds, all_filtered_bert_output_raw_flatten))):
         if span_pred == []:
             continue
-
+        # span：{"start": 1, "end":3}
         for span in span_pred:
+            # 获取实体的embedding [768]
             span_emb = torch.mean(filtered_bert_output_raw_flatten[span["start"]:span["end"] + 1], 0)
+            # print('span_emb', span_emb.size())
             if args.use_type_name:
+                # 再拼接一个实体的embedding [768 * 2]
                 cat_span_emb = torch.cat((span_emb, span_emb), dim=-1)
+                # print('cat_span_emb:', cat_span_emb.size())
+                # [len(label_types_id)]
                 logit = torch.matmul(all_proto_emb, cat_span_emb)
+                # print("logit:", logit.size())
             else:
                 logit = torch.matmul(all_proto_emb, span_emb)
 
             tmp_all_logits.append(logit)
-
+    # [预测的实体个数，len(label_types_id)]
     logits = torch.stack(tmp_all_logits)
+    # print('logits:', logits.size())
     logits_numpy = logits.detach().cpu().numpy()
     logits_normalize = F.normalize(logits, p=2, dim=0)
+    # 是个list，list的每个元素是预测的实体的label在label_types_id的索引
     raw_preds = torch.argmax(logits_normalize, -1).cpu().numpy().tolist()
+    # print('raw_preds:', torch.argmax(logits_normalize, -1).size())
+    # 只有预测概率大于实体阈值，才认为这个预测是有效的
     if args.filter:
         for logit_numpy, pred in zip(logits_numpy, raw_preds):
             if max(logit_numpy) / 2 > span_threshold:
@@ -659,7 +688,7 @@ def predict_stage2_episode(args, bert_encoder_pt, all_proto_emb, span_preds, que
     else:
         preds = raw_preds
 
-
+    # 记录预测的标签id
     preds_label = []
     for item in preds:
         if item < 0:
@@ -673,8 +702,10 @@ def predict_stage2_episode(args, bert_encoder_pt, all_proto_emb, span_preds, que
     # for example, span_preds=[[{"strat":1,"end":2},{"strat":3,"end":5}],], then all_preds_label=[[2,1],]
     all_preds_label = []
 
+    # 记录每个实体位置对应的 label
     for i, span_pred in enumerate(span_preds):
         tmp = []
+        # 遍历每个句子的每个实体位置
         for j in range(idx_now, idx_now + len(span_pred)):
             tmp.append(preds_label[j])
         all_preds_label.append(tmp)
@@ -723,6 +754,7 @@ def cal_f1(preds_label, span_preds, query_labels_ids):
 
 def evaluate_episodes(args):
     ################get episodes data ##################
+    # 会根据设定的start和num读取相应数量的episodes数据
     episodes_data = read_episodes_data_from_file(filepath=args.filepath_target_episodes,
                                                  args=args,
                                                  start=args.test_episodes_num_start,
@@ -788,7 +820,7 @@ def evaluate_episodes(args):
     num_fn_type_all_stages = 0
 
     sum_inference_time = 0
-
+    # 选择哪些目标域的测试集来评估，每个episode都会重新加载训练模型，因此不同episode之间不会有干扰
     for episode in tqdm(range(args.test_episodes_num - args.test_episodes_num_start)):
         set_seeds(args)
         if args.filter and (not args.test_stage1_only):
@@ -807,10 +839,12 @@ def evaluate_episodes(args):
         episode_data = episodes_data[episode]
         span_preds = []
 
+        # [[2,2,0],[0,0],]
         support_labels_ids = episode_data["support_labels_ids"]
         support_sentences = episode_data["support_sentences"]
         # 原型的获取
         label_dict = {}
+        # 获取这个episode_data 中support的所有标签
         label_types_id = list(set([item for item_list in support_labels_ids for item in item_list]))
         label_types_id.remove(0)
         for i in range(len(label_types_id)):
@@ -818,8 +852,12 @@ def evaluate_episodes(args):
         if not args.test_stage2_only:
             ######### reload the ModelStage1 ##########################
             ModelStage1.load_state_dict(checkpoint_bert_model_stage1['model_state_dict'])
-
+            # 预测的实体的位置和一些指标
             span_preds, metric_stage1 = adapt_predict_stage1_episode(args, episode_data, ModelStage1)
+
+            print("-----span_pred-----", file=results_file)
+            print(span_preds, file=results_file)
+            print("-----span_pred-----", file=results_file)
 
             sum_inference_time += metric_stage1["stage_1_inference_time"]
 
@@ -847,7 +885,8 @@ def evaluate_episodes(args):
                 span_preds.append(extract_entity_span(label_io))
 
         if not args.test_stage1_only:
-
+            
+            # ？？？这个地方上面不是写了吗
             label_dict = {}
             label_types_id = list(set([item for item_list in support_labels_ids for item in item_list]))
             label_types_id.remove(0)
@@ -856,6 +895,7 @@ def evaluate_episodes(args):
 
             if args.filter:
                 # stage2_finetune_time_a = time.time()
+                # 根据support数据集对二阶段模型进行微调，在这个地方，二阶段模型的线性层输出变成了support集的标签，并进行了重新训练
                 ModelStage2 = adapt_stage2(args=args,
                                            ModelStage2=ModelStage2,
                                            sentences_support=support_sentences,
@@ -868,14 +908,21 @@ def evaluate_episodes(args):
                 # print('stage2_finetune_time_b - stage2_finetune_time_a', stage2_finetune_time_b - stage2_finetune_time_a)
 
                 bert_encoder_pt = ModelStage2.encoder
+                # 所有句子标签对应的实体的归一化embedding [len(label_types_id)，实体的embedding(768)]
                 all_proto_emb_support = get_original_prototypes(args,
                                                                 ModelStage2.encoder,
                                                                 support_sentences,
                                                                 support_labels_ids,
                                                                 label_dict, label_types_id)
+                # print("all_proto_emb_support:", all_proto_emb_support.size())
+                # 如果使用另类名称
                 if args.use_type_name:
+                    # 获取proxy_label的embedding，[len(label_types_id), 768]
                     all_label_emb = get_proxy_label_emb(args, ModelStage2, label_types_id)
+                    # print(all_label_emb.size())
+                    # 将label的embedding 和 实体的embedding拼接在一起，[len(label_types_id), 768 * 2]
                     all_proto_emb = torch.cat((all_label_emb, all_proto_emb_support), dim=-1)
+                    # 计算实体识别模型中的阈值，具体不想看了，看论文应该可以知道是干嘛的
                     span_threshold = cal_span_threshold(args=args,
                                                         ModelStage2=ModelStage2,
                                                         all_label_emb=all_label_emb,
@@ -903,7 +950,7 @@ def evaluate_episodes(args):
 
             if args.test_stage2_only:
                 span_threshold = 0
-
+            # 预测实体的标签
             preds_label, stage_2_inference_time = predict_stage2_episode(args,
                                                                          bert_encoder_pt,
                                                                          all_proto_emb,
@@ -914,17 +961,23 @@ def evaluate_episodes(args):
                                                                          label_types_id,
                                                                          span_threshold=span_threshold)
             sum_inference_time += stage_2_inference_time
-
+            # 对于每个句子
             for pred_label, span_pred, query_label_id in zip(preds_label, span_preds, query_labels_ids):
 
+                # 返回[{"start":0,"end":1,"label":2},{"start":3,"end":3,"label":7}]
                 span_label_gold = extract_entity_span_label(query_label_id)
 
                 span_label_pred = []
+                # 将预测的标签和位置转换为span_label_gold一样的形式
                 for label, span in zip(pred_label, span_pred):
                     if label > 0:
                         span["label"] = label
                         span_label_pred.append(span)
-
+                print("-----span_label_pred-----", file=results_file)
+                print(span_label_pred, file=results_file)
+                print('----------------------------------------------', file=results_file)
+                print(span_label_gold, file=results_file)
+                print("-----span_label_gold-----", file=results_file)
                 num_pred_all_stages += len(span_label_pred)
                 num_gold_all_stages += len(span_label_gold)
                 for item in span_label_pred:
@@ -936,10 +989,13 @@ def evaluate_episodes(args):
                 spans_gold = [{"start": item["start"], "end": item["end"]} for item in span_label_gold]
                 # print(spans_pred)
                 # print(spans_gold)
+                # 计算一些用于计算指标的变量
                 for item in span_label_pred:
+                    # 预测错了
                     if item not in span_label_gold:
                         num_fp_all_stages += 1
                         span_item = {"start": item["start"], "end": item["end"]}
+                        # 判断是因为标签不对还是因为位置不对
                         if span_item in spans_gold:
                             num_fp_type_all_stages += 1
                         else:
@@ -1436,7 +1492,7 @@ def evaluate_cross_domain(args):
 
 def evaluate(args):
     all_f1 = []
-    if args.dataset_target == 'FEW-NERD-INTRA' or args.dataset_target == 'FEW-NERD-INTER':
+    if args.dataset_target == 'FEW-NERD-INTRA' or args.dataset_target == 'FEW-NERD-INTER' or args.dataset_target == 'GOV-NERD':
         metric_stage1_all, metric_all_stages_all, metric_stage1_filtered_all = evaluate_episodes(args)
     # Domain Transfer setting
     else:
