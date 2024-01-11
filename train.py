@@ -6,16 +6,19 @@ from tqdm import trange, tqdm
 from transformers import get_linear_schedule_with_warmup
 
 from model import BertModelStage1, BertModelStage2
-from utils import convert_label_to_id, read_conll2003_format_data_from_file, convert_label_id_to_io, GetDataLoader
+from utils import convert_label_to_id, read_conll2003_format_data_from_file, read_gov_nerd_format_data_from_file, convert_label_id_to_io, GetDataLoader
 
 
 def train_stage1(args):
     # source数据处理
-    sentences_train, labels_train = read_conll2003_format_data_from_file(args.filepath_source_train,
-                                                                         args.dataset_source)
+    if args.dataset_target in ['GOV-NERD']:
+        sentences_train, labels_train = read_gov_nerd_format_data_from_file(args.filepath_source_train)
+    else:
+        sentences_train, labels_train = read_conll2003_format_data_from_file(args.filepath_source_train,
+                                                                             args.dataset_source)
 
     labels_ids_train = []
-    if args.dataset_target in ['FEW-NERD-INTRA', 'FEW-NERD-INTER']:
+    if args.dataset_target in ['FEW-NERD-INTRA', 'FEW-NERD-INTER', 'GOV-NERD']:
         labels_ids_train = convert_label_to_id(labels_train, args)
     elif args.dataset_target in ['WNUT17', 'CONLL2003', 'I2B2', 'GUM']:
         strict_range = [i for i in range(args.source_class_num)]
@@ -81,9 +84,12 @@ def train_stage1(args):
 
 def train_stage2(args):
     # read sentence and corresponding labels from the file
-    sentences_train, labels_train = read_conll2003_format_data_from_file(filepath=args.filepath_source_train,
+    if args.dataset_target in ['GOV-NERD']:
+        sentences_train, labels_train = read_gov_nerd_format_data_from_file(args.filepath_source_train)
+    else:
+        sentences_train, labels_train = read_conll2003_format_data_from_file(filepath=args.filepath_source_train,
                                                                          data_name=args.dataset_source)
-    if args.dataset_target in ['FEW-NERD-INTRA', 'FEW-NERD-INTER']:
+    if args.dataset_target in ['FEW-NERD-INTRA', 'FEW-NERD-INTER', 'GOV-NERD']:
         labels_ids_train = convert_label_to_id(labels=labels_train,
                                                args=args,
                                                strict_range=None)
